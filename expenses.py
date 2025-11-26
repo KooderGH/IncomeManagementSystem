@@ -1,3 +1,4 @@
+# Wriiten by Kenn
 import matplotlib.pyplot as plt
 
 weeks_data = {1: {"categories": [], "amounts": []}}
@@ -96,4 +97,5 @@ def main():
         cont = input("\nContinue? Y/N: ").strip().lower()
         if cont != "y":
             break
+
 main()
