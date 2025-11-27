@@ -1,38 +1,30 @@
-# Written by Kian
-import matplotlib.pyplot
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg, NavigationToolbar2Tk)
-import numpy as np
-from tkinter import *
+#CODE BY KIAN 
+import matplotlib, numpy
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import tkinter as w
 
-window = Tk()
-window.geometry('500x500')
+Windows = w.Tk()
+Windows.geometry('600x500')
+Windows.title('Income')
 
-values = ([50, 100, 150])
-categories = ['Source of Income', 'Gross Income', 'Net Income']
+f, ax = plt.subplots()
 
-def chart():
-	fig = Figure(figsize = (5,5), dpi = 100)
-	y = [i**2 for i in range(101)]
-	chart1 = fig.add_subplot(111)
-	chart1.chart(y)
+data = (21, 41, 35, 67)
+bar_colors = ['skyblue', 'skyblue', 'red', 'red']
+ind = numpy.arange(4)
+width = .4
 
-	xpos = np.arange(len(categories))
+bar1 = ax.bar(ind, data, width, color=bar_colors)
 
-	matplotlib.pyplot.bar(xpos, values, color=['Gold', 'Gold', 'Gold'])
-	matplotlib.pyplot.xlabel('Categories')
-	matplotlib.pyplot.ylabel('Values')
-	matplotlib.pyplot.title('Income Graph')
-	matplotlib.pyplot.xticks(xpos, categories)
+ax.set_ylabel('Amount')
+ax.set_title('Income Data')
+ax.set_xticks(ind + width / 20)
+ax.set_xticklabels(('Gross\nIncome', 'Net\nIncome', 'Gross\nIncome', 'Net\nIncome'))
 
-	canvas = FigureCanvasTkAgg(fig, master = window)
-	canvas.draw()
-	canvas.get_tk_widget().pack()
-	toolbar = NavigationToolbar2Tk(canvas, window)
-	toolbar.update()
-	canvas.get_tk_widget().pack()
+canvas = FigureCanvasTkAgg(f, master=Windows)
+canvas.draw()
+canvas.get_tk_widget().pack(side=w.TOP, fill=w.BOTH, expand=1)
 
-button = Button(master = window, command = chart,
-                height = 2, width = 10, text ='Bar Graph')
-
-button.pack()
+w.mainloop()
