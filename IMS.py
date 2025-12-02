@@ -1,4 +1,3 @@
-# Written By: cedrick (debugged)
 from tkinter import *
 from tkinter import messagebox
 from tkinter.ttk import Combobox
@@ -6,14 +5,15 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from tkcalendar import DateEntry
-from datetime import *
+from datetime import datetime, date, timedelta
 import calendar
 import numpy as np
+import platform
 
 root = Tk()
-# MAINWINDOW Details`
+# MAINWINDOW Details
 root.geometry("1080x720")
-root.minsize(1080,720)
+root.minsize(1080, 720)
 try:
     ic0n = PhotoImage(file='coin.png')
     root.iconphoto(True, ic0n)
@@ -36,11 +36,80 @@ varTimeSpan = StringVar()
 startDate = StringVar()
 netInc_data = []
 
+TimespanList = ["Weeks", "Months", "Years"]
+current_span_index = 0
+IncomeValues = []
+ExpenseValues = []
+
+ExpenseCanvas = Frame()
+IncomeCanvas = Frame()
+
+
 def validate_amount(text):
     if text == "":
         return True
-    return text.replace(".", "", 1).isdigit()   
+    return text.replace(".", "", 1).isdigit()
 vcmd = (root.register(validate_amount), "%P")
+
+def parse_amount(s):
+    """Return float or None if invalid/blank."""
+    s = (s or "").strip()
+    if s == "":
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+def add_months(orig_date, months):
+    """Add (or subtract) months to a date safely."""
+    # orig_date: datetime.date
+    month = orig_date.month - 1 + months
+    year = orig_date.year + month // 12
+    month = month % 12 + 1
+    day = min(orig_date.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def calculate_next_date(current_date, span, step=1):
+    """Return the next or previous date given a timespan and step (+1 or -1)."""
+    if span == "Weeks":
+        return current_date + timedelta(weeks=step)
+    elif span == "Months":
+        return add_months(current_date, step)
+    else:  # Years
+        try:
+            return date(current_date.year + step, current_date.month, current_date.day)
+        except Exception:
+            # fallback for invalid day in month
+            year = current_date.year + step
+            month = current_date.month
+            day = min(current_date.day, calendar.monthrange(year, month)[1])
+            return date(year, month, day)
+
+
+def prefill_timespan(span, target_date):
+    """Prefill the current income/expense entries if data exists for this timespan."""
+    record = next((r for r in totals_by_span.get(span, []) if r['start_date'] == target_date.isoformat()), None)
+    clear_all_income_fields()
+    clear_all_expense_fields()
+
+    if record:
+        # Prefill Income
+        for rec in income_data:
+            amt = record.get('income_by_cat', {}).get(rec["category"].get().strip(), "")
+            if amt != "":
+                rec["amount"].insert(0, str(amt))
+        # Prefill Expenses
+        for rec in expense_data:
+            amt = record.get('expense_by_cat', {}).get(rec["category"].get().strip(), "")
+            if amt != "":
+                rec["amount"].insert(0, str(amt))
+
+
+def compute_overall_net(all_entries):
+    """Return the total net income across all saved records."""
+    return sum(r.get('income', 0) - r.get('expense', 0) for r in all_entries)
 
 class ScrollFrame(Frame):
     def __init__(self, container, height=None, *args, **kwargs):
@@ -53,6 +122,7 @@ class ScrollFrame(Frame):
         self.canvas.configure(yscrollcommand=self.vscroll.set)
         self.scrollable_frame = Frame(self.canvas)
         self._window_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+
         def _on_frame_configure(event):
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         self.scrollable_frame.bind("<Configure>", _on_frame_configure)
@@ -65,16 +135,41 @@ class ScrollFrame(Frame):
         self.canvas.pack(side="left", fill="both", expand=True)
         self.vscroll.pack(side="right", fill="y")
 
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._on_mousewheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+        # Better cross-platform wheel support:
+        self.canvas.bind("<Enter>", lambda e: self._bind_mousewheel())
+        self.canvas.bind("<Leave>", lambda e: self._unbind_mousewheel())
 
-    def _on_mousewheel(self, event):
+    def _on_mousewheel_windows(self, event):
+        # Windows and many X11 bindings emit event.delta multiples of 120
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+    def _on_mousewheel_x11_up(self, event):
+        self.canvas.yview_scroll(-1, "units")
+
+    def _on_mousewheel_x11_down(self, event):
+        self.canvas.yview_scroll(1, "units")
+
+    def _bind_mousewheel(self):
+        # Use platform detection for safer binding
+        if platform.system() == "Linux":
+            self.canvas.bind_all("<Button-4>", self._on_mousewheel_x11_up)
+            self.canvas.bind_all("<Button-5>", self._on_mousewheel_x11_down)
+        else:
+            # Windows & macOS
+            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_windows)
+
+    def _unbind_mousewheel(self):
+        if platform.system() == "Linux":
+            self.canvas.unbind_all("<Button-4>")
+            self.canvas.unbind_all("<Button-5>")
+        else:
+            self.canvas.unbind_all("<MouseWheel>")
+
 class PieChart:
-    def __init__(self, parent_frame, expense_data):
+    def __init__(self, parent_frame, expense_data, total_label=None):
         self.parent_frame = parent_frame
         self.expense_data = expense_data
+        self.total_label = total_label
         self.canvas_widget = None
         self.toolbar = None
 
@@ -100,17 +195,17 @@ class PieChart:
 
         labels = []
         amounts = []
-        total_expense = 0
+        total_expense = 0.0
         for record in self.expense_data:
             cat = record["category"].get().strip()
-            amt_str = record["amount"].get().strip()
-            if cat != "" and amt_str.replace(".", "", 1).isdigit():
-                amt = float(amt_str)
+            amt = parse_amount(record["amount"].get())
+            if cat != "" and amt is not None:
                 labels.append(cat)
                 amounts.append(amt)
                 total_expense += amt
 
-        totExp.config(text=f"Total Expenses: {total_expense:.2f}")
+        if self.total_label:
+            self.total_label.config(text=f"Total Expenses: {total_expense:.2f}")
 
         if not amounts:
             ax.text(0.5, 0.5, 'No data to display', ha='center', va='center')
@@ -128,10 +223,11 @@ class PieChart:
         self.toolbar.pack(side=BOTTOM, fill=X)
 
 class BarChart:
-    def __init__(self, parent_frame, income_data, expense_data):
+    def __init__(self, parent_frame, income_data, expense_data, net_label=None):
         self.parent_frame = parent_frame
         self.income_data = income_data
         self.expense_data = expense_data
+        self.net_label = net_label
         self.canvas_widget = None
         self.toolbar = None
 
@@ -157,21 +253,23 @@ class BarChart:
 
         labels = []
         amounts = []
-        total_income = 0
+        total_income = 0.0
         for record in self.income_data:
             cat = record["category"].get().strip()
-            amt_str = record["amount"].get().strip()
-            if cat != "":
-                try:
-                    amt = float(amt_str)
-                    labels.append(cat)
-                    amounts.append(amt)
-                    total_income += amt
-                except ValueError:
-                    pass
+            amt = parse_amount(record["amount"].get())
+            if cat != "" and amt is not None:
+                labels.append(cat)
+                amounts.append(amt)
+                total_income += amt
 
-        total_expense = sum(float(rec["amount"].get() or 0) for rec in self.expense_data if rec["amount"].get().replace(".", "", 1).isdigit())
-        netInc.config(text=f"Net Income: {total_income - total_expense:.2f}")
+        total_expense = 0.0
+        for rec in self.expense_data:
+            amt = parse_amount(rec["amount"].get())
+            if amt is not None:
+                total_expense += amt
+
+        if self.net_label:
+            self.net_label.config(text=f"Net Income: {total_income - total_expense:.2f}")
 
         if labels and amounts:
             ind = np.arange(len(amounts))
@@ -198,53 +296,61 @@ class LineChart:
         self.canvas_widget = None
         self.toolbar = None
 
-    def render(self, data_list=None):
-        """Render the line chart with all saved timespans, labeled Week/Month/Year."""
-        # Destroy existing canvas/toolbar
+    def render(self):
+        # Destroy existing
         if self.canvas_widget:
-            self.canvas_widget.get_tk_widget().destroy()
+            try:
+                self.canvas_widget.get_tk_widget().destroy()
+            except:
+                pass
             self.canvas_widget = None
+
         if self.toolbar:
-            self.toolbar.destroy()
+            try:
+                self.toolbar.destroy()
+            except:
+                pass
             self.toolbar = None
+
         plt.close('all')
 
-        if not data_list:
-            fig = Figure(figsize=(4,3), dpi=100)
-            ax = fig.add_subplot(111)
-            ax.text(0.5, 0.5, "No data to display", ha='center', va='center')
+        # Build the combined chronological dataset
+        combined = []
+
+        for span_type, records in self.totals_by_span.items():
+            for i, rec in enumerate(records, start=1):
+                combined.append({
+                    "label": f"{span_type[:-1]} {i}",   # Week 1, Month 1, Year 1
+                    "gross": rec["gross_total"],
+                    "expense": rec["expense_total"],
+                    "net": rec["net_total"]
+                })
+
+        fig = Figure(figsize=(4, 3), dpi=100)
+        ax = fig.add_subplot(111)
+
+        if not combined:
+            ax.text(0.5, 0.5, "No data to display", ha="center", va="center")
         else:
-            fig = Figure(figsize=(4,3), dpi=100)
-            ax = fig.add_subplot(111)
+            x = np.arange(len(combined))
 
-            # Prepare X-axis labels
-            span_counters = {"Weeks":0, "Months":0, "Years":0}
-            x_labels, gross_values, expense_values, net_values = [], [], [], []
+            gross_values   = [c["gross"] for c in combined]
+            expense_values = [c["expense"] for c in combined]
+            net_values     = [c["net"] for c in combined]
+            x_labels       = [c["label"] for c in combined]
 
-            for entry in data_list:
-                span_type = entry.get("span_type", "Unknown")
-                span_counters[span_type] += 1
-                label = f"{span_type[:-1]} {span_counters[span_type]}"  # Week 1, Month 1, Year 1
-                x_labels.append(label)
-                gross_values.append(entry["income"])
-                expense_values.append(entry["expense"])
-                net_values.append(entry["net"])
+            ax.plot(x, gross_values, marker="o", label="Gross Income")
+            ax.plot(x, expense_values, marker="o", label="Expenses")
+            ax.plot(x, net_values, marker="o", label="Net Income")
 
-            ind = np.arange(len(data_list))
-            ax.plot(ind, gross_values, marker='o', label='Gross Income', color='green')
-            ax.plot(ind, expense_values, marker='o', label='Expenses', color='red')
-            ax.plot(ind, net_values, marker='o', label='Net Income', color='blue')
-
-            ax.set_xticks(ind)
-            ax.set_xticklabels(x_labels, rotation=45, ha='right')
-            ax.set_xlabel("Timespan")
+            ax.set_xticks(x)
+            ax.set_xticklabels(x_labels, rotation=45, ha="right")
             ax.set_ylabel("Amount")
             ax.set_title("Income vs Expenses Over Time")
             ax.grid(True)
             ax.legend()
             ax.margins(x=0.05)
 
-        # Pack canvas and toolbar
         self.canvas_widget = FigureCanvasTkAgg(fig, master=self.parent_frame)
         self.canvas_widget.draw()
         self.canvas_widget.get_tk_widget().pack(fill="both", expand=True)
@@ -256,19 +362,17 @@ class LineChart:
 
 
 
-
-
-
-# DATE RELATED 
+# DATE RELATED
 current_timespan = StringVar(value="Week")
 def set_default_date():
-    today = datetime.today().strftime("%Y-%m-%d")
+    # set DateSelct to today's date (DateEntry expects date or datetime)
     try:
-        DateSelct.delete(0, "end")
-        DateSelct.insert(0, today)
+        DateSelct.set_date(date.today())
     except Exception:
+        # fallback to string insert (rare)
         try:
-            DateSelct.set_date(datetime.today())
+            DateSelct.delete(0, "end")
+            DateSelct.insert(0, date.today().isoformat())
         except Exception:
             pass
 
@@ -296,7 +400,10 @@ def addExpense():
     expense_data.append(expEnt_record)
     catExp.bind("<Button-3>", lambda event, rec=expEnt_record: expEnt_menu(event, rec))
     catExp.focus_set()
-    DateSelct.config(state="disabled")
+    try:
+        DateSelct.config(state="disabled")
+    except Exception:
+        pass
 
 def expEnt_menu(event, record):
     menu_expEnt.entryconfigure(0, command=lambda: deleteExp_row(record))
@@ -334,7 +441,10 @@ def addIncome():
     income_data.append(incEnt_record)
     catInc.bind("<Button-3>", lambda event, rec=incEnt_record: incEnt_menu(event, rec))
     catInc.focus_set()
-    DateSelct.config(state="disabled")
+    try:
+        DateSelct.config(state="disabled")
+    except Exception:
+        pass
 
 def incEnt_menu(event, record):
     menu_incEnt.entryconfigure(0, command=lambda: deleteInc_row(record))
@@ -356,150 +466,210 @@ def clear_all_income_fields():
         rec["amount"].delete(0, "end")
 
 # COMPARISON(LINE-CHART)
-def update_totals_tables(span, data_list=None):
-    if data_list is None:
-        data_list = totals_by_span.get(span, [])
-    data_list = sorted(data_list, key=lambda x: x['start_date'])
-
-    # clear the scrollable frames
-    for sf in (grosTotSF, expTotSF, netTotSF):
-        for widget in sf.scrollable_frame.winfo_children():
-            widget.destroy()
-
-    # TOTAL GROSS INCOME per category aggregated across stored timespans
-    income_totals = {}
-    for rec in data_list:
-        for cat, amt in rec.get("income_by_cat", {}).items():
-            income_totals[cat] = income_totals.get(cat, 0) + amt
-
-    if income_totals:
-        for cat, total_amt in sorted(income_totals.items()):
-            Label(
-                grosTotSF.scrollable_frame,
-                text=f"{cat} | {total_amt:.2f}",
-                anchor="w",
-                bg="lightgrey"
-            ).pack(fill="x")
-    else:
-        Label(
-            grosTotSF.scrollable_frame,
-            text="No income categories yet",
-            anchor="w",
-            bg="lightgrey"
-        ).pack(fill="x")
-
-    # TOTAL EXPENSES per category aggregated across stored timespans
-    expense_totals = {}
-    for rec in data_list:
-        for cat, amt in rec.get("expense_by_cat", {}).items():
-            expense_totals[cat] = expense_totals.get(cat, 0) + amt
-
-    if expense_totals:
-        for cat, total_amt in sorted(expense_totals.items()):
-            Label(
-                expTotSF.scrollable_frame,
-                text=f"{cat} | {total_amt:.2f}",
-                anchor="w",
-                bg="lightgrey"
-            ).pack(fill="x")
-    else:
-        Label(
-            expTotSF.scrollable_frame,
-            text="No expense categories yet",
-            anchor="w",
-            bg="lightgrey"
-        ).pack(fill="x")
-
-    # NET INCOME PER STORED TIMESPAN
-    overall_net = 0.0
-    if data_list:
-        for i, rec in enumerate(data_list):
-            span_label = f"{span[:-1]} {i+1}"
-            net_val = rec.get("net", 0.0)
-            overall_net += net_val
-            Label(
-                netTotSF.scrollable_frame,
-                text=f"{span_label} | {net_val:.2f}",
-                anchor="w",
-                bg="lightgrey"
-            ).pack(fill="x")
-
-        Label(
-            netTotSF.scrollable_frame,
-            text=f"Overall Net | {overall_net:.2f}",
-            anchor="w",
-            bg="lightgrey",
-            font=("Calibri", 10, "bold")
-        ).pack(fill="x", pady=(6,0))
-    else:
-        Label(
-            netTotSF.scrollable_frame,
-            text="No stored timespans yet",
-            anchor="w",
-            bg="lightgrey"
-        ).pack(fill="x")
-
-def GenResult():
-    """Save current timespan data and update line chart & totals across all saved timespans."""
-    span = varTimeSpan.get()
-    date_str = DateSelct.get()
-
-    # Build income_by_cat and expense_by_cat
-    income_by_cat = {}
-    for rec in income_data:
-        cat = rec["category"].get().strip()
-        amt_str = rec["amount"].get().strip()
-        if cat and amt_str.replace(".", "", 1).isdigit():
-            income_by_cat[cat] = income_by_cat.get(cat, 0) + float(amt_str)
-
-    expense_by_cat = {}
-    for rec in expense_data:
-        cat = rec["category"].get().strip()
-        amt_str = rec["amount"].get().strip()
-        if cat and amt_str.replace(".", "", 1).isdigit():
-            expense_by_cat[cat] = expense_by_cat.get(cat, 0) + float(amt_str)
-
-    total_income = sum(income_by_cat.values())
-    total_expense = sum(expense_by_cat.values())
+def update_totals_tables(span, data_list):
+    total_income = sum(entry.get("income", 0.0) for entry in data_list)
+    total_expense = sum(entry.get("expense", 0.0) for entry in data_list)
     net_total = total_income - total_expense
 
-    if not income_by_cat and not expense_by_cat:
-        messagebox.showinfo("No Data", "No valid entries for this timespan.")
-        return
+    grossTotal.config(text=f"Total Gross Income: {total_income:.2f}")
+    expTotal.config(text=f"Total Expense: {total_expense:.2f}")
+    netTotal.config(text=f"Total Net Income: {net_total:.2f}")
 
-    # Save/update record in totals_by_span
-    record = next((r for r in totals_by_span[span] if r["start_date"] == date_str), None)
-    record_data = {
+
+def collect_current_entries():
+    """
+    Read the current GUI income_data and expense_data Entry widgets and
+    return two lists of dicts: incomes, expenses.
+    Format: [{"category": "Salary", "amount": 123.45}, ...]
+    """
+    incomes = []
+    expenses = []
+
+    # income_data and expense_data are lists of {"category": Entry, "amount": Entry}
+    for rec in income_data:
+        cat = rec["category"].get().strip()
+        amt = parse_amount(rec["amount"].get())
+        if cat and amt is not None:
+            incomes.append({"category": cat, "amount": amt})
+
+    for rec in expense_data:
+        cat = rec["category"].get().strip()
+        amt = parse_amount(rec["amount"].get())
+        if cat and amt is not None:
+            expenses.append({"category": cat, "amount": amt})
+
+    return incomes, expenses
+
+
+def save_current_timespan():
+    """
+    Build a consistent record from the current entries and append to totals_by_span.
+    Includes:
+    - per-category lists
+    - per-category summed totals
+    - per-span totals
+    - span index for charts
+    """
+    global totals_by_span, TimespanList, current_span_index
+
+    try:
+        current_date = DateSelct.get_date()
+        date_str = current_date.isoformat()
+    except Exception:
+        date_str = date.today().isoformat()
+
+    span_type = varTimeSpan.get() or "Weeks"
+
+    incomes, expenses = collect_current_entries()
+
+    # -----------------------------------------
+    # 1. PER-CATEGORY SUMMATION
+    # -----------------------------------------
+    income_categories = {}
+    for entry in incomes:
+        cat = entry["category"]
+        income_categories.setdefault(cat, 0)
+        income_categories[cat] += entry["amount"]
+
+    expense_categories = {}
+    for entry in expenses:
+        cat = entry["category"]
+        expense_categories.setdefault(cat, 0)
+        expense_categories[cat] += entry["amount"]
+
+    # -----------------------------------------
+    # 2. TOTALS
+    # -----------------------------------------
+    gross_total = sum(income_categories.values())
+    expense_total = sum(expense_categories.values())
+    net_total = gross_total - expense_total
+
+    # -----------------------------------------
+    # 3. Create final record structure
+    # -----------------------------------------
+    record = {
         "start_date": date_str,
-        "income": total_income,
-        "expense": total_expense,
-        "net": net_total,
-        "income_by_cat": income_by_cat,
-        "expense_by_cat": expense_by_cat,
-        "span_type": span
-    }
-    if record:
-        record.update(record_data)
-    else:
-        totals_by_span[span].append(record_data)
+        "span_type": span_type,
+        "span_index": current_span_index,   # <-- NECESSARY FOR CHARTS
 
-    # Clear input fields
+        "income_list": incomes,
+        "expense_list": expenses,
+
+        "income_totals": income_categories,     # <-- FIXED
+        "expense_totals": expense_categories,   # <-- FIXED
+
+        "gross_total": gross_total,
+        "expense_total": expense_total,
+        "net_total": net_total,
+    }
+
+    # -----------------------------------------
+    # 4. Append record to the correct span bucket
+    # -----------------------------------------
+    totals_by_span.setdefault(span_type, []).append(record)
+
+    # -----------------------------------------
+    # 5. Clear UI fields
+    # -----------------------------------------
     clear_all_income_fields()
     clear_all_expense_fields()
-    root.update()
 
-    # Gather all entries across all timespans
-    all_entries = []
-    for s in ["Weeks", "Months", "Years"]:
-        all_entries.extend(totals_by_span[s])
-    all_entries.sort(key=lambda x: datetime.strptime(x['start_date'], "%Y-%m-%d"))
+    return record
 
-    # Update summary tables using all entries
-    update_totals_tables(span, data_list=all_entries)
 
-    # Render line chart using all entries
-    lineChart.render(data_list=all_entries)
 
+print("\n=== DEBUG: totals_by_span ===")
+for span_type, records in totals_by_span.items():
+    print(f"Span: {span_type}")
+    for r in records:
+        print("  ", r)
+
+print("\n=== DEBUG: income_categories ===", income_categories if 'income_categories' in globals() else "NOT DEFINED")
+print("\n=== DEBUG: expense_categories ===", expense_categories if 'expense_categories' in globals() else "NOT DEFINED")
+print("\n=== DEBUG: net_rows ===", net_rows if 'net_rows' in globals() else "NOT DEFINED")
+
+def GenResult():
+    global totals_by_span
+
+    # -----------------------
+    # Clear old UI rows
+    # -----------------------
+    for w in grosTotSF.scrollable_frame.winfo_children():
+        w.destroy()
+    for w in expTotSF.scrollable_frame.winfo_children():
+        w.destroy()
+    for w in netTotSF.scrollable_frame.winfo_children():
+        w.destroy()
+
+    # -----------------------
+    # Merge all records
+    # -----------------------
+    merged = []
+    for span, records in totals_by_span.items():
+        for rec in records:
+            merged.append(rec)
+
+    if not merged:
+        messagebox.showinfo("No Data", "No timespan data was found.")
+        return
+
+    # -----------------------
+    # Build category totals
+    # -----------------------
+    income_categories = {}
+    expense_categories = {}
+    net_rows = []
+
+    for rec in merged:
+        # income categories
+        for item in rec["income_list"]:
+            cat = item["category"]
+            income_categories[cat] = income_categories.get(cat, 0) + item["amount"]
+
+        # expense categories
+        for item in rec["expense_list"]:
+            cat = item["category"]
+            expense_categories[cat] = expense_categories.get(cat, 0) + item["amount"]
+
+        # net per timespan
+        net_rows.append((rec["span_type"], rec["net_total"]))
+
+    # -----------------------
+    # Totals across categories
+    # -----------------------
+    total_gross = sum(income_categories.values())
+    total_expense = sum(expense_categories.values())
+    total_net = total_gross - total_expense
+
+    grossTotal.config(text=f"Total Gross Income: {total_gross:.2f}")
+    expTotal.config(text=f"Total Expense: {total_expense:.2f}")
+    netTotal.config(text=f"Total Net Income: {total_net:.2f}")
+
+    # -----------------------
+    # Fill scroll frames
+    # -----------------------
+    # Gross income categories table
+    for cat, val in income_categories.items():
+        Label(grosTotSF.scrollable_frame,
+              text=f"{cat}: {val:.2f}",
+              bg="lightgrey").pack(anchor="w")
+
+    # Expense categories table
+    for cat, val in expense_categories.items():
+        Label(expTotSF.scrollable_frame,
+              text=f"{cat}: {val:.2f}",
+              bg="lightgrey").pack(anchor="w")
+
+    # Net per timespan table
+    for span, val in net_rows:
+        Label(netTotSF.scrollable_frame,
+              text=f"{span}: {val:.2f}",
+              bg="lightgrey").pack(anchor="w")
+
+    # -----------------------
+    # Final step: Render line chart
+    # -----------------------
+    lineChart.render()   # ← NO MORE PARAMETERS
 
 
 
@@ -507,86 +677,58 @@ def GenResult():
 
 # NEXT & PREV BUTTONS FUNCTIONS
 def go_next_timespan():
-    GenResult()
-    span = varTimeSpan.get()
-    current_date = datetime.strptime(DateSelct.get(), "%Y-%m-%d")
+    """
+    Save the current timespan dataset and advance the index *for that span type*.
+    This allows multiple weeks, multiple months, etc., each with their own index.
+    """
+    global totals_by_span, current_span_index
 
-    if span == "Weeks":
-        next_date = current_date + timedelta(weeks=1)
-    elif span == "Months":
-        month = current_date.month + 1
-        year = current_date.year
-        if month > 12:
-            month = 1
-            year += 1
-        last_day = calendar.monthrange(year, month)[1]
-        next_date = current_date.replace(day=min(current_date.day, last_day), month=month, year=year)
-    else:  # Years
-        next_date = current_date.replace(year=current_date.year + 1)
+    # Save the record first
+    record = save_current_timespan()
 
+    span_type = record["span_type"]
+
+    # Count how many records exist for THIS span type
+    entries_for_span = totals_by_span.get(span_type, [])
+
+    # The next index is simply the length of the list
+    # (0-based indexing -> if 1 entry exists, next index is 1)
+    current_span_index = len(entries_for_span)
+
+    # --- OPTIONAL: move calendar date forward automatically ---
     try:
-        DateSelct.set_date(next_date)
+        new_date = calculate_next_date(
+            DateSelct.get_date(),
+            span_type,
+            1
+        )
+        DateSelct.set_date(new_date)
     except Exception:
-        DateSelct.delete(0, "end")
-        DateSelct.insert(0, next_date.strftime("%Y-%m-%d"))
-
-    # Clear fields before prefill
-    clear_all_income_fields()
-    clear_all_expense_fields()
-
-    # Prefill if record exists
-    data_list = totals_by_span.get(span, [])
-    record = next((r for r in data_list if r['start_date'] == next_date.strftime("%Y-%m-%d")), None)
-    if record:
-        for rec in income_data:
-            amt = record.get('income_by_cat', {}).get(rec["category"].get().strip(), "")
-            if amt != "":
-                rec["amount"].insert(0, str(amt))
-        for rec in expense_data:
-            amt = record.get('expense_by_cat', {}).get(rec["category"].get().strip(), "")
-            if amt != "":
-                rec["amount"].insert(0, str(amt))
-
-    # Update chart & totals with all entries
-    all_entries = []
-    for s in ["Weeks", "Months", "Years"]:
-        all_entries.extend(totals_by_span[s])
-    all_entries.sort(key=lambda x: datetime.strptime(x['start_date'], "%Y-%m-%d"))
-    update_totals_tables(span, data_list=all_entries)
-    lineChart.render(data_list=all_entries)
+        pass
 
 
 def go_prev_timespan():
-    GenResult()
     span = varTimeSpan.get()
-    current_date = datetime.strptime(DateSelct.get(), "%Y-%m-%d")
+    try:
+        current_date = DateSelct.get_date()
+    except Exception:
+        messagebox.showerror("Invalid date", "Please select a valid date.")
+        return
 
     if span == "Weeks":
         prev_date = current_date - timedelta(weeks=1)
     elif span == "Months":
-        month = current_date.month - 1
-        year = current_date.year
-        if month < 1:
-            month = 12
-            year -= 1
-        last_day = calendar.monthrange(year, month)[1]
-        prev_date = current_date.replace(day=min(current_date.day, last_day), month=month, year=year)
-    else:  # Years
-        prev_date = current_date.replace(year=current_date.year - 1)
+        prev_date = add_months(current_date, -1)
+    else:
+        prev_date = date(current_date.year - 1, current_date.month, min(current_date.day, calendar.monthrange(current_date.year - 1, current_date.month)[1]))
 
-    try:
-        DateSelct.set_date(prev_date)
-    except Exception:
-        DateSelct.delete(0, "end")
-        DateSelct.insert(0, prev_date.strftime("%Y-%m-%d"))
-
-    # Clear fields before prefill
+    DateSelct.set_date(prev_date)
     clear_all_income_fields()
     clear_all_expense_fields()
 
     # Prefill if record exists
     data_list = totals_by_span.get(span, [])
-    record = next((r for r in data_list if r['start_date'] == prev_date.strftime("%Y-%m-%d")), None)
+    record = next((r for r in data_list if r['start_date'] == prev_date.isoformat()), None)
     if record:
         for rec in income_data:
             amt = record.get('income_by_cat', {}).get(rec["category"].get().strip(), "")
@@ -596,14 +738,6 @@ def go_prev_timespan():
             amt = record.get('expense_by_cat', {}).get(rec["category"].get().strip(), "")
             if amt != "":
                 rec["amount"].insert(0, str(amt))
-
-    # Update chart & totals with all entries
-    all_entries = []
-    for s in ["Weeks", "Months", "Years"]:
-        all_entries.extend(totals_by_span[s])
-    all_entries.sort(key=lambda x: datetime.strptime(x['start_date'], "%Y-%m-%d"))
-    update_totals_tables(span, data_list=all_entries)
-    lineChart.render(data_list=all_entries)
 
 
 
@@ -656,14 +790,19 @@ NextPrev.grid(row=2, column=0, columnspan=2, sticky=S)
 LabelEx1 = Label(ExpFrame, text='Expenses:', font=("Calibri", 14), bg="white")
 ChartExp = Frame(ExpFrame, bg='lightgrey', width=300, height=300)
 ChartExp.pack_propagate(False)
-pieChart = PieChart(ChartExp, expense_data)
+
 ExpListCont = Frame(ExpFrame, bg="lightgrey", width=200, height=150, relief=SUNKEN, borderwidth=2)
 ExpListCont.grid_propagate(False)
 ExpScrollFrame = ScrollFrame(ExpListCont, height=150)
 ExpScrollFrame.scrollable_frame.config(bg="lightgrey")
+
 totExp = Label(ExpListCont, text='Total Expenses: ', font=("Calibri", 14), bg="lightgrey")
 addExp = Button(ExpFrame, text='Add Expense', font=("Calibri", 14), command=addExpense)
 chartE = Button(ExpFrame, text='Generate Chart', font=("Calibri", 14))
+
+# Now create pieChart passing totExp so it doesn't use a global
+pieChart = PieChart(ChartExp, expense_data, total_label=totExp)
+
 LabelEx1.grid(row=0, column=0, sticky=N)
 ChartExp.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky=NSEW)
 ExpListCont.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky=NSEW)
@@ -690,14 +829,19 @@ TimeSpanSel.pack(side=LEFT)
 LabelIn1 = Label(IncFrame, text='Income Source(s):', font=("Calibri", 14), bg="white")
 ChartInc = Frame(IncFrame, bg='lightgrey', width=300, height=300)
 ChartInc.pack_propagate(False)
-barChart = BarChart(ChartInc, income_data, expense_data)
+
 IncListCont = Frame(IncFrame, bg="lightgrey", width=200, height=150, relief=SUNKEN, borderwidth=2)
 IncListCont.grid_propagate(False)
 IncScrollFrame = ScrollFrame(IncListCont, height=150)
 IncScrollFrame.scrollable_frame.config(bg="lightgrey")
+
 netInc = Label(IncListCont, text='Net Income: ', font=("Calibri", 14), bg="lightgrey")
 addInc = Button(IncFrame, text='Add Income', font=("Calibri", 14), command=addIncome)
 chartI = Button(IncFrame, text='Generate Graph', font=("Calibri", 14))
+
+# Create barChart after netInc exists
+barChart = BarChart(ChartInc, income_data, expense_data, net_label=netInc)
+
 LabelIn1.grid(row=0, column=0, sticky=N)
 ChartInc.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky=NSEW)
 IncListCont.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky=NSEW)
