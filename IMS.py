@@ -1,3 +1,4 @@
+from customUI import *
 from tkinter import *
 from tkinter import messagebox
 from tkinter.ttk import Combobox
@@ -10,6 +11,7 @@ import calendar
 import numpy as np
 import platform
 
+
 root = Tk()
 # MAINWINDOW Details
 root.geometry("1080x720")
@@ -21,7 +23,7 @@ except Exception:
     pass
 root.title("Income Management System")
 
-# SHARED FUNCTIONS, CLASSES, & VARIABLES
+# SHARED FUNCTIONS & VARIABLES
 totals_by_span = {
     'Weeks': [],
     'Months': [],
@@ -51,16 +53,6 @@ def validate_amount(text):
     return text.replace(".", "", 1).isdigit()
 vcmd = (root.register(validate_amount), "%P")
 
-def parse_amount(s):
-    """Return float or None if invalid/blank."""
-    s = (s or "").strip()
-    if s == "":
-        return None
-    try:
-        return float(s)
-    except Exception:
-        return None
-
 def add_months(orig_date, months):
     """Add (or subtract) months to a date safely."""
     # orig_date: datetime.date
@@ -71,25 +63,26 @@ def add_months(orig_date, months):
     return date(year, month, day)
 
 
-def calculate_next_date(current_date, span, step=1):
-    """Return the next or previous date given a timespan and step (+1 or -1)."""
-    if span == "Weeks":
+def calculate_next_date(current_date, span_type, step=1):
+    if span_type == "Weeks":
         return current_date + timedelta(weeks=step)
-    elif span == "Months":
-        return add_months(current_date, step)
-    else:  # Years
+    elif span_type == "Months":
+        month = current_date.month - 1 + step
+        year = current_date.year + month // 12
+        month = month % 12 + 1
+        day = min(current_date.day, calendar.monthrange(year, month)[1])
+        return date(year, month, day)
+    elif span_type == "Years":
         try:
             return date(current_date.year + step, current_date.month, current_date.day)
-        except Exception:
-            # fallback for invalid day in month
-            year = current_date.year + step
-            month = current_date.month
-            day = min(current_date.day, calendar.monthrange(year, month)[1])
-            return date(year, month, day)
+        except ValueError:
+            # handle Feb 29 -> Feb 28 on non-leap years
+            return date(current_date.year + step, 2, 28)
+    return current_date  # fallback
+
 
 
 def prefill_timespan(span, target_date):
-    """Prefill the current income/expense entries if data exists for this timespan."""
     record = next((r for r in totals_by_span.get(span, []) if r['start_date'] == target_date.isoformat()), None)
     clear_all_income_fields()
     clear_all_expense_fields()
@@ -111,253 +104,7 @@ def compute_overall_net(all_entries):
     """Return the total net income across all saved records."""
     return sum(r.get('income', 0) - r.get('expense', 0) for r in all_entries)
 
-class ScrollFrame(Frame):
-    def __init__(self, container, height=None, *args, **kwargs):
-        super().__init__(container, *args, **kwargs)
-        if height is not None:
-            self.configure(height=height)
-            self.pack_propagate(False)
-        self.canvas = Canvas(self, highlightthickness=0)
-        self.vscroll = Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.vscroll.set)
-        self.scrollable_frame = Frame(self.canvas)
-        self._window_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
 
-        def _on_frame_configure(event):
-            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self.scrollable_frame.bind("<Configure>", _on_frame_configure)
-
-        def _on_canvas_configure(event):
-            canvas_width = event.width
-            self.canvas.itemconfig(self._window_id, width=canvas_width)
-        self.canvas.bind("<Configure>", _on_canvas_configure)
-
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.vscroll.pack(side="right", fill="y")
-
-        # Better cross-platform wheel support:
-        self.canvas.bind("<Enter>", lambda e: self._bind_mousewheel())
-        self.canvas.bind("<Leave>", lambda e: self._unbind_mousewheel())
-
-    def _on_mousewheel_windows(self, event):
-        # Windows and many X11 bindings emit event.delta multiples of 120
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    def _on_mousewheel_x11_up(self, event):
-        self.canvas.yview_scroll(-1, "units")
-
-    def _on_mousewheel_x11_down(self, event):
-        self.canvas.yview_scroll(1, "units")
-
-    def _bind_mousewheel(self):
-        # Use platform detection for safer binding
-        if platform.system() == "Linux":
-            self.canvas.bind_all("<Button-4>", self._on_mousewheel_x11_up)
-            self.canvas.bind_all("<Button-5>", self._on_mousewheel_x11_down)
-        else:
-            # Windows & macOS
-            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel_windows)
-
-    def _unbind_mousewheel(self):
-        if platform.system() == "Linux":
-            self.canvas.unbind_all("<Button-4>")
-            self.canvas.unbind_all("<Button-5>")
-        else:
-            self.canvas.unbind_all("<MouseWheel>")
-
-class PieChart:
-    def __init__(self, parent_frame, expense_data, total_label=None):
-        self.parent_frame = parent_frame
-        self.expense_data = expense_data
-        self.total_label = total_label
-        self.canvas_widget = None
-        self.toolbar = None
-
-    def render(self):
-        # destroy existing
-        if self.canvas_widget:
-            try:
-                self.canvas_widget.get_tk_widget().destroy()
-            except Exception:
-                pass
-            self.canvas_widget = None
-        if self.toolbar:
-            try:
-                self.toolbar.destroy()
-            except Exception:
-                pass
-            self.toolbar = None
-        plt.close('all')
-
-        self.parent_frame.update_idletasks()
-        fig = Figure(figsize=(4, 3), dpi=100)
-        ax = fig.add_subplot(111)
-
-        labels = []
-        amounts = []
-        total_expense = 0.0
-        for record in self.expense_data:
-            cat = record["category"].get().strip()
-            amt = parse_amount(record["amount"].get())
-            if cat != "" and amt is not None:
-                labels.append(cat)
-                amounts.append(amt)
-                total_expense += amt
-
-        if self.total_label:
-            self.total_label.config(text=f"Total Expenses: {total_expense:.2f}")
-
-        if not amounts:
-            ax.text(0.5, 0.5, 'No data to display', ha='center', va='center')
-        else:
-            ax.pie(amounts, labels=labels, autopct='%1.1f%%')
-            ax.set_title("Expense Distribution")
-
-        # pack the canvas and toolbar (stable placement)
-        self.canvas_widget = FigureCanvasTkAgg(fig, master=self.parent_frame)
-        self.canvas_widget.draw()
-        self.canvas_widget.get_tk_widget().pack(fill="both", expand=True)
-
-        self.toolbar = NavigationToolbar2Tk(self.canvas_widget, self.parent_frame)
-        self.toolbar.update()
-        self.toolbar.pack(side=BOTTOM, fill=X)
-
-class BarChart:
-    def __init__(self, parent_frame, income_data, expense_data, net_label=None):
-        self.parent_frame = parent_frame
-        self.income_data = income_data
-        self.expense_data = expense_data
-        self.net_label = net_label
-        self.canvas_widget = None
-        self.toolbar = None
-
-    def render(self):
-        # destroy existing
-        if self.canvas_widget:
-            try:
-                self.canvas_widget.get_tk_widget().destroy()
-            except Exception:
-                pass
-            self.canvas_widget = None
-        if self.toolbar:
-            try:
-                self.toolbar.destroy()
-            except Exception:
-                pass
-            self.toolbar = None
-        plt.close('all')
-
-        self.parent_frame.update_idletasks()
-        fig = Figure(figsize=(4, 3), dpi=100)
-        ax = fig.add_subplot(111)
-
-        labels = []
-        amounts = []
-        total_income = 0.0
-        for record in self.income_data:
-            cat = record["category"].get().strip()
-            amt = parse_amount(record["amount"].get())
-            if cat != "" and amt is not None:
-                labels.append(cat)
-                amounts.append(amt)
-                total_income += amt
-
-        total_expense = 0.0
-        for rec in self.expense_data:
-            amt = parse_amount(rec["amount"].get())
-            if amt is not None:
-                total_expense += amt
-
-        if self.net_label:
-            self.net_label.config(text=f"Net Income: {total_income - total_expense:.2f}")
-
-        if labels and amounts:
-            ind = np.arange(len(amounts))
-            ax.bar(ind, amounts, width=0.5)
-            ax.set_ylabel("Amount")
-            ax.set_title("Income Overview")
-            ax.set_xticks(ind)
-            ax.set_xticklabels(labels, rotation=45, ha="right")
-        else:
-            ax.text(0.5, 0.5, "No data to display", ha="center", va="center")
-
-        self.canvas_widget = FigureCanvasTkAgg(fig, master=self.parent_frame)
-        self.canvas_widget.draw()
-        self.canvas_widget.get_tk_widget().pack(fill="both", expand=True)
-
-        self.toolbar = NavigationToolbar2Tk(self.canvas_widget, self.parent_frame)
-        self.toolbar.update()
-        self.toolbar.pack(side=BOTTOM, fill=X)
-
-class LineChart:
-    def __init__(self, parent_frame, totals_by_span):
-        self.parent_frame = parent_frame
-        self.totals_by_span = totals_by_span
-        self.canvas_widget = None
-        self.toolbar = None
-
-    def render(self):
-        # Destroy existing
-        if self.canvas_widget:
-            try:
-                self.canvas_widget.get_tk_widget().destroy()
-            except:
-                pass
-            self.canvas_widget = None
-
-        if self.toolbar:
-            try:
-                self.toolbar.destroy()
-            except:
-                pass
-            self.toolbar = None
-
-        plt.close('all')
-
-        # Build the combined chronological dataset
-        combined = []
-
-        for span_type, records in self.totals_by_span.items():
-            for i, rec in enumerate(records, start=1):
-                combined.append({
-                    "label": f"{span_type[:-1]} {i}",   # Week 1, Month 1, Year 1
-                    "gross": rec["gross_total"],
-                    "expense": rec["expense_total"],
-                    "net": rec["net_total"]
-                })
-
-        fig = Figure(figsize=(4, 3), dpi=100)
-        ax = fig.add_subplot(111)
-
-        if not combined:
-            ax.text(0.5, 0.5, "No data to display", ha="center", va="center")
-        else:
-            x = np.arange(len(combined))
-
-            gross_values   = [c["gross"] for c in combined]
-            expense_values = [c["expense"] for c in combined]
-            net_values     = [c["net"] for c in combined]
-            x_labels       = [c["label"] for c in combined]
-
-            ax.plot(x, gross_values, marker="o", label="Gross Income")
-            ax.plot(x, expense_values, marker="o", label="Expenses")
-            ax.plot(x, net_values, marker="o", label="Net Income")
-
-            ax.set_xticks(x)
-            ax.set_xticklabels(x_labels, rotation=45, ha="right")
-            ax.set_ylabel("Amount")
-            ax.set_title("Income vs Expenses Over Time")
-            ax.grid(True)
-            ax.legend()
-            ax.margins(x=0.05)
-
-        self.canvas_widget = FigureCanvasTkAgg(fig, master=self.parent_frame)
-        self.canvas_widget.draw()
-        self.canvas_widget.get_tk_widget().pack(fill="both", expand=True)
-
-        self.toolbar = NavigationToolbar2Tk(self.canvas_widget, self.parent_frame)
-        self.toolbar.update()
-        self.toolbar.pack(side=BOTTOM, fill=X)
 
 
 
@@ -365,7 +112,6 @@ class LineChart:
 # DATE RELATED
 current_timespan = StringVar(value="Week")
 def set_default_date():
-    # set DateSelct to today's date (DateEntry expects date or datetime)
     try:
         DateSelct.set_date(date.today())
     except Exception:
@@ -382,7 +128,170 @@ def unlock_date():
 def dateSelect(event):
     DateSelct.config(state="normal")
 
-# MENU FUNCTIONS (left as placeholder)
+# MENU FUNCTIONS
+def save_as_textFile():
+    if not any(totals_by_span.values()):
+        messagebox.showwarning("No Data", "There is no data to save.")
+    return  # inside the function
+#save not working
+    from tkinter.filedialog import asksaveasfilename
+
+    filepath = asksaveasfilename(
+        defaultextension=".txt",
+        filetypes=[("Text Files", "*.txt")],
+        title="Save Income Data"
+    )
+
+    if not filepath:
+        return  # user cancelled
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("INCOME MANAGEMENT SYSTEM REPORT\n")
+        f.write("=" * 40 + "\n\n")
+
+        span_counters = {"Weeks": 0, "Months": 0, "Years": 0}
+
+        for span_type in ["Weeks", "Months", "Years"]:
+            records = totals_by_span.get(span_type, [])
+            if not records:
+                continue  # skip empty spans entirely
+
+            f.write(f"=== {span_type.upper()} ===\n\n")
+
+            for rec in records:
+                span_counters[span_type] += 1
+                f.write(f"{span_type[:-1]} {span_counters[span_type]} - Date: {rec['start_date']}\n")
+                f.write(f"Gross Income: {rec['gross_total']:.2f}\n")
+                f.write(f"Expense Total: {rec['expense_total']:.2f}\n")
+                f.write(f"Net Total: {rec['net_total']:.2f}\n\n")
+
+                f.write("  Income by Category:\n")
+                for cat, amt in rec['income_totals'].items():
+                    f.write(f"    {cat}: {amt:.2f}\n")
+
+                f.write("\n  Expense by Category:\n")
+                for cat, amt in rec['expense_totals'].items():
+                    f.write(f"    {cat}: {amt:.2f}\n")
+
+                f.write("\n" + "-" * 40 + "\n\n")
+    messagebox.showinfo("Saved", f"File saved to:\n{filepath}")
+
+
+def reset_all():
+    global totals_by_span, current_span_index, lineChart
+
+    totals_by_span = {
+        'Weeks': [],
+        'Months': [],
+        'Years': []
+    }
+    current_span_index = 0
+
+    clear_all_income_fields()
+    clear_all_expense_fields()
+
+    for rec in income_data:
+        try:
+            rec["category"].delete(0, "end")
+            rec["amount"].delete(0, "end")
+        except Exception:
+            pass
+
+    for rec in expense_data:
+        try:
+            rec["category"].delete(0, "end")
+            rec["amount"].delete(0, "end")
+        except Exception:
+            pass
+
+    set_default_date()
+
+    try:
+        totExp.config(text="Total Expenses: ")
+    except:
+        pass
+    try:
+        netInc.config(text="Net Income: ")
+    except:
+        pass
+    try:
+        grossTotal.config(text="Total Gross Income: 0.00")
+        expTotal.config(text="Total Expense: 0.00")
+        netTotal.config(text="Total Net Income: 0.00")
+    except:
+        pass
+
+    try:
+        for w in ChartExp.winfo_children():
+            w.destroy()
+    except:
+        pass
+    try:
+        for w in ChartInc.winfo_children():
+            w.destroy()
+    except:
+        pass
+
+    try:
+        for w in grosTotSF.scrollable_frame.winfo_children():
+            w.destroy()
+    except:
+        pass
+    try:
+        for w in expTotSF.scrollable_frame.winfo_children():
+            w.destroy()
+    except:
+        pass
+    try:
+        for w in netTotSF.scrollable_frame.winfo_children():
+            w.destroy()
+    except:
+        pass
+
+    try:
+        if lineChart is not None:
+            cw = getattr(lineChart, "canvas_widget", None)
+            if cw:
+                try:
+                    cw.get_tk_widget().destroy()
+                except:
+                    pass
+                try:
+                    lineChart.canvas_widget = None
+                except:
+                    pass
+
+            tb = getattr(lineChart, "toolbar", None)
+            if tb:
+                try:
+                    tb.destroy()
+                except:
+                    pass
+                try:
+                    lineChart.toolbar = None
+                except:
+                    pass
+    except:
+        pass
+
+    try:
+        for w in ChartLine.winfo_children():
+            w.destroy()
+    except:
+        pass
+
+    try:
+        lineChart = LineChart(ChartLine, totals_by_span)
+    except:
+        lineChart = None
+
+    messagebox.showinfo("Reset Complete", "All data and charts have been reset.")
+    DateSelct.config(state="readonly")
+    TimeSpanSel.config(state="readonly")
+
+
+
+
 # EXPENSE FUNCTIONS
 menu_expEnt = Menu(root, tearoff=0)
 menu_expEnt.add_command(label="Delete Entry")
@@ -404,6 +313,9 @@ def addExpense():
         DateSelct.config(state="disabled")
     except Exception:
         pass
+    if DateSelct:
+        DateSelct.config(state="disabled")
+    TimeSpanSel.config(state="disabled")
 
 def expEnt_menu(event, record):
     menu_expEnt.entryconfigure(0, command=lambda: deleteExp_row(record))
@@ -445,6 +357,9 @@ def addIncome():
         DateSelct.config(state="disabled")
     except Exception:
         pass
+    if DateSelct:
+        DateSelct.config(state="disabled")
+    TimeSpanSel.config(state="disabled")
 
 def incEnt_menu(event, record):
     menu_incEnt.entryconfigure(0, command=lambda: deleteInc_row(record))
@@ -465,7 +380,8 @@ def clear_all_income_fields():
     for rec in income_data:
         rec["amount"].delete(0, "end")
 
-# COMPARISON(LINE-CHART)
+
+# COMPARISON SECTION (LINE-CHART)
 def update_totals_tables(span, data_list):
     total_income = sum(entry.get("income", 0.0) for entry in data_list)
     total_expense = sum(entry.get("expense", 0.0) for entry in data_list)
@@ -475,17 +391,19 @@ def update_totals_tables(span, data_list):
     expTotal.config(text=f"Total Expense: {total_expense:.2f}")
     netTotal.config(text=f"Total Net Income: {net_total:.2f}")
 
+def parse_amount(s):
+    s = (s or "").strip()
+    if s == "":
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
 
 def collect_current_entries():
-    """
-    Read the current GUI income_data and expense_data Entry widgets and
-    return two lists of dicts: incomes, expenses.
-    Format: [{"category": "Salary", "amount": 123.45}, ...]
-    """
     incomes = []
     expenses = []
 
-    # income_data and expense_data are lists of {"category": Entry, "amount": Entry}
     for rec in income_data:
         cat = rec["category"].get().strip()
         amt = parse_amount(rec["amount"].get())
@@ -502,29 +420,21 @@ def collect_current_entries():
 
 
 def save_current_timespan():
-    """
-    Build a consistent record from the current entries and append to totals_by_span.
-    Includes:
-    - per-category lists
-    - per-category summed totals
-    - per-span totals
-    - span index for charts
-    """
     global totals_by_span, TimespanList, current_span_index
 
     try:
         current_date = DateSelct.get_date()
-        date_str = current_date.isoformat()
     except Exception:
-        date_str = date.today().isoformat()
+        current_date = date.today()
+    date_str = current_date.isoformat()
 
+# --- Determine the current span type ---
     span_type = varTimeSpan.get() or "Weeks"
 
+# --- Collect current entries for income and expenses ---
     incomes, expenses = collect_current_entries()
 
-    # -----------------------------------------
-    # 1. PER-CATEGORY SUMMATION
-    # -----------------------------------------
+# --- Aggregate totals by category ---
     income_categories = {}
     for entry in incomes:
         cat = entry["category"]
@@ -537,63 +447,36 @@ def save_current_timespan():
         expense_categories.setdefault(cat, 0)
         expense_categories[cat] += entry["amount"]
 
-    # -----------------------------------------
-    # 2. TOTALS
-    # -----------------------------------------
+# --- Compute totals ---
     gross_total = sum(income_categories.values())
     expense_total = sum(expense_categories.values())
-    net_total = gross_total - expense_total
+    net_total = gross_total - expense_total  # NEW: ensures net_total is always set
 
-    # -----------------------------------------
-    # 3. Create final record structure
-    # -----------------------------------------
+# --- Build record for this timespan ---
     record = {
         "start_date": date_str,
-        "span_type": span_type,
-        "span_index": current_span_index,   # <-- NECESSARY FOR CHARTS
-
+        "span_type": span_type,         
+        "span_index": current_span_index,
         "income_list": incomes,
         "expense_list": expenses,
-
-        "income_totals": income_categories,     # <-- FIXED
-        "expense_totals": expense_categories,   # <-- FIXED
-
+        "income_totals": income_categories,
+        "expense_totals": expense_categories,
         "gross_total": gross_total,
         "expense_total": expense_total,
-        "net_total": net_total,
+        "net_total": net_total,         
     }
 
-    # -----------------------------------------
-    # 4. Append record to the correct span bucket
-    # -----------------------------------------
     totals_by_span.setdefault(span_type, []).append(record)
 
-    # -----------------------------------------
-    # 5. Clear UI fields
-    # -----------------------------------------
     clear_all_income_fields()
     clear_all_expense_fields()
-
     return record
 
 
 
-print("\n=== DEBUG: totals_by_span ===")
-for span_type, records in totals_by_span.items():
-    print(f"Span: {span_type}")
-    for r in records:
-        print("  ", r)
-
-print("\n=== DEBUG: income_categories ===", income_categories if 'income_categories' in globals() else "NOT DEFINED")
-print("\n=== DEBUG: expense_categories ===", expense_categories if 'expense_categories' in globals() else "NOT DEFINED")
-print("\n=== DEBUG: net_rows ===", net_rows if 'net_rows' in globals() else "NOT DEFINED")
-
 def GenResult():
     global totals_by_span
 
-    # -----------------------
-    # Clear old UI rows
-    # -----------------------
     for w in grosTotSF.scrollable_frame.winfo_children():
         w.destroy()
     for w in expTotSF.scrollable_frame.winfo_children():
@@ -601,9 +484,6 @@ def GenResult():
     for w in netTotSF.scrollable_frame.winfo_children():
         w.destroy()
 
-    # -----------------------
-    # Merge all records
-    # -----------------------
     merged = []
     for span, records in totals_by_span.items():
         for rec in records:
@@ -613,9 +493,6 @@ def GenResult():
         messagebox.showinfo("No Data", "No timespan data was found.")
         return
 
-    # -----------------------
-    # Build category totals
-    # -----------------------
     income_categories = {}
     expense_categories = {}
     net_rows = []
@@ -634,9 +511,6 @@ def GenResult():
         # net per timespan
         net_rows.append((rec["span_type"], rec["net_total"]))
 
-    # -----------------------
-    # Totals across categories
-    # -----------------------
     total_gross = sum(income_categories.values())
     total_expense = sum(expense_categories.values())
     total_net = total_gross - total_expense
@@ -645,10 +519,6 @@ def GenResult():
     expTotal.config(text=f"Total Expense: {total_expense:.2f}")
     netTotal.config(text=f"Total Net Income: {total_net:.2f}")
 
-    # -----------------------
-    # Fill scroll frames
-    # -----------------------
-    # Gross income categories table
     for cat, val in income_categories.items():
         Label(grosTotSF.scrollable_frame,
               text=f"{cat}: {val:.2f}",
@@ -666,10 +536,7 @@ def GenResult():
               text=f"{span}: {val:.2f}",
               bg="lightgrey").pack(anchor="w")
 
-    # -----------------------
-    # Final step: Render line chart
-    # -----------------------
-    lineChart.render()   # ← NO MORE PARAMETERS
+    lineChart.render() 
 
 
 
@@ -677,25 +544,16 @@ def GenResult():
 
 # NEXT & PREV BUTTONS FUNCTIONS
 def go_next_timespan():
-    """
-    Save the current timespan dataset and advance the index *for that span type*.
-    This allows multiple weeks, multiple months, etc., each with their own index.
-    """
     global totals_by_span, current_span_index
 
-    # Save the record first
     record = save_current_timespan()
 
     span_type = record["span_type"]
 
-    # Count how many records exist for THIS span type
     entries_for_span = totals_by_span.get(span_type, [])
 
-    # The next index is simply the length of the list
-    # (0-based indexing -> if 1 entry exists, next index is 1)
     current_span_index = len(entries_for_span)
 
-    # --- OPTIONAL: move calendar date forward automatically ---
     try:
         new_date = calculate_next_date(
             DateSelct.get_date(),
@@ -707,7 +565,7 @@ def go_next_timespan():
         pass
 
 
-def go_prev_timespan():
+def go_prev_timespan(): #not tested
     span = varTimeSpan.get()
     try:
         current_date = DateSelct.get_date()
@@ -741,16 +599,18 @@ def go_prev_timespan():
 
 
 
-# -v-v-v-v- GUI -v-v-v-
+#-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v
+#-v-v-v-GRAPHIC USER INTERFACE CONFIGURATION-v-v-v-
+#-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v-v
 # Main Menu
 Menubar = Menu(root, relief=RAISED, borderwidth=1)
 root.config(menu=Menubar)
 fileMenu = Menu(Menubar, tearoff=0)
-Menubar.add_cascade(label="File", menu=fileMenu)
-fileMenu.add_command(label="Open", command=lambda: None)
-fileMenu.add_command(label="Save", command=lambda: None)
+Menubar.add_cascade(label="Menu", menu=fileMenu)
+fileMenu.add_command(label="Save", command= save_as_textFile)
 fileMenu.add_separator()
-fileMenu.add_command(label="Exit", command=root.quit)
+fileMenu.add_command(label="Reset", command= reset_all)
+
 
 # TITLE-BAR FRAME
 Titlebar = Frame(root, bg="white")
@@ -813,7 +673,7 @@ chartE.grid(row=4, column=1, padx=5, pady=5, sticky=NSEW)
 chartE.config(command=pieChart.render)
 
 # Date Related Elements
-DateSelct = DateEntry(DateRel, font=('Arial', 12), selectmode='day', year=2025, month=11, day=22)
+DateSelct = DateEntry(DateRel, font=('Arial', 12), selectmode='date')
 TimeSpanSel = Combobox(DateRel, font=('Arial', 12),
                        textvariable=varTimeSpan,
                        values=['Weeks', 'Months', 'Years'],
