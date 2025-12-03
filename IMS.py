@@ -1,15 +1,10 @@
 from customUI import *
 from tkinter import *
-from tkinter import messagebox
 from tkinter.ttk import Combobox
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from tkcalendar import DateEntry
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 import calendar
-import numpy as np
 
 root = Tk()
 root.geometry("1080x720")
@@ -817,3 +812,4 @@ netTotSF.pack(fill="both", expand=True)
 netTotal.pack(fill="both", expand=True)
 
 root.mainloop()
+
